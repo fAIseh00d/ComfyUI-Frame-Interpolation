@@ -32,16 +32,16 @@ def warp(tenInput, tenFlow):
     k = (str(tenFlow.device), str(tenFlow.size()))
     if k not in backwarp_tenGrid:
         tenHorizontal = (
-            torch.linspace(-1.0, 1.0, tenFlow.shape[3], device=device)
+            torch.linspace(-1.0, 1.0, tenFlow.shape[3], device=tenFlow.device)
             .view(1, 1, 1, tenFlow.shape[3])
             .expand(tenFlow.shape[0], -1, tenFlow.shape[2], -1)
         )
         tenVertical = (
-            torch.linspace(-1.0, 1.0, tenFlow.shape[2], device=device)
+            torch.linspace(-1.0, 1.0, tenFlow.shape[2], device=tenFlow.device)
             .view(1, 1, tenFlow.shape[2], 1)
             .expand(tenFlow.shape[0], -1, -1, tenFlow.shape[3])
         )
-        backwarp_tenGrid[k] = torch.cat([tenHorizontal, tenVertical], 1).to(device)
+        backwarp_tenGrid[k] = torch.cat([tenHorizontal, tenVertical], 1)
 
     tenFlow = torch.cat(
         [
@@ -57,7 +57,7 @@ def warp(tenInput, tenFlow):
         g = g.half()
 
     padding_mode = "border"
-    if device.type == "mps":
+    if tenInput.device.type == "mps":
         # https://github.com/pytorch/pytorch/issues/125098
         padding_mode = "zeros"
         g = g.clamp(-1, 1)

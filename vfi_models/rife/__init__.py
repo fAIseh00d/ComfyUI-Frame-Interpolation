@@ -11,6 +11,22 @@ import gc
 
 MODEL_TYPE = pathlib.Path(__file__).parent.name
 
+
+def get_device_string(tensor_device):
+    """Get a string representation of the tensor's device."""
+    if hasattr(tensor_device, 'index') and tensor_device.index is not None:
+        return f"{tensor_device.type}:{tensor_device.index}"
+    else:
+        return tensor_device.type
+
+
+def get_device_list():
+    """Get list of available devices for model execution."""
+    devices = ["AUTO", "CPU"]
+    if torch.cuda.is_available():
+        devices += [f"cuda:{i}" for i in range(torch.cuda.device_count())]
+    return devices
+
 CKPT_NAME_VER_DICT = {
     "rife40.pth": "4.0",
     "rife41.pth": "4.0",
@@ -50,7 +66,8 @@ class RIFE_VFI:
                 "scale_factor": ([0.25, 0.5, 1.0, 2.0, 4.0, 8.0], {"default": 1.0})
             },
             "optional": {
-                "optional_interpolation_states": ("INTERPOLATION_STATES", )
+                "optional_interpolation_states": ("INTERPOLATION_STATES", ),
+                "device": (get_device_list(), {"default": "AUTO"})
             }
         }
 
@@ -69,6 +86,7 @@ class RIFE_VFI:
         ensemble = False,
         scale_factor = 1.0,
         optional_interpolation_states: InterpolationStateList = None,
+        device: str = "AUTO",
         **kwargs
     ):
         """
@@ -93,6 +111,30 @@ class RIFE_VFI:
             To prevent memory overflow, it clears the CUDA cache after processing a specified number of frames.
         """
         
+        # Determine device for model execution
+        if device == "AUTO":
+            execution_device = get_torch_device()
+        elif device == "CPU":
+            execution_device = torch.device("cpu")
+        else:
+            execution_device = torch.device(device)
+
+        # Convert input frames from NHWC to NCHW and ensure float32 dtype
+        frames = preprocess_frames(frames)
+        dtype = torch.float32
+
+        # Detect device of input frames for logging
+        if frames.numel() > 0:  # Check if tensor has elements
+            frame_device_string = get_device_string(frames.device)
+            print(f"Comfy-VFI: Input frames device detected as: {frame_device_string}")
+        else:
+            print("Comfy-VFI: Input frames tensor is empty")
+
+        # Move frames to execution device if they're not already there
+        if frames.device != execution_device:
+            print(f"Comfy-VFI: Moving frames from {get_device_string(frames.device)} to {get_device_string(execution_device)}")
+            frames = frames.to(execution_device)
+
         # Local import of the model definition to avoid circular imports
         from .rife_arch import IFNet
 
@@ -103,12 +145,7 @@ class RIFE_VFI:
         interpolation_model.load_state_dict(torch.load(model_path))
 
         # Move model to correct device and set to eval mode
-        device = get_torch_device()
-        interpolation_model.eval().to(device)
-
-        # Convert input frames from NHWC to NCHW and ensure float32 dtype
-        frames = preprocess_frames(frames)
-        dtype = torch.float32
+        interpolation_model.eval().to(execution_device)
 
         # Prepare per-frame multipliers
         if isinstance(multiplier, int):
@@ -156,9 +193,9 @@ class RIFE_VFI:
                 frame1_list.append(frame1_cpu)
                 timestep_list.append(dt)
             # combine and move to device
-            frame0_batch = torch.cat(frame0_list, dim=0).to(device).to(dtype)
-            frame1_batch = torch.cat(frame1_list, dim=0).to(device).to(dtype)
-            timestep_tensor = torch.tensor(timestep_list, dtype=dtype, device=device).view(-1, 1, 1, 1)
+            frame0_batch = torch.cat(frame0_list, dim=0).to(execution_device).to(dtype)
+            frame1_batch = torch.cat(frame1_list, dim=0).to(execution_device).to(dtype)
+            timestep_tensor = torch.tensor(timestep_list, dtype=dtype, device=execution_device).view(-1, 1, 1, 1)
 
             with torch.no_grad():
                 middle_frames = interpolation_model(
@@ -170,11 +207,11 @@ class RIFE_VFI:
                     ensemble
                 ).clamp(0, 1)
 
-            middle_frames_cpu = middle_frames.detach().cpu().to(dtype)
+            middle_frames_processed = middle_frames.detach().to(execution_device).to(dtype)
 
             # assign outputs
             for idx, (pair_idx, _dt) in enumerate(batch_tasks):
-                results[pair_idx].append(middle_frames_cpu[idx:idx+1])
+                results[pair_idx].append(middle_frames_processed[idx:idx+1])
                 num_tasks_per_pair[pair_idx] -= 1
                 if num_tasks_per_pair[pair_idx] == 0:
                     frames_processed_since_cache_clear += 1
